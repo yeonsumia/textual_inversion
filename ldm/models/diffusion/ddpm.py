@@ -79,6 +79,8 @@ class DDPM(pl.LightningModule):
                  ):
         super().__init__()
         assert parameterization in ["eps", "x0"], 'currently only supporting "eps" and "x0"'
+        # eps: model이 epsilon을 학습하는 경우
+        # x0: model이 x0을 학습하는 경우
         self.parameterization = parameterization
         print(f"{self.__class__.__name__}: Running in {self.parameterization}-prediction mode")
         self.cond_stage_model = None
@@ -128,10 +130,14 @@ class DDPM(pl.LightningModule):
         if exists(given_betas):
             betas = given_betas
         else:
+            # timesteps = T
+            # shape = (T,)
             betas = make_beta_schedule(beta_schedule, timesteps, linear_start=linear_start, linear_end=linear_end,
                                        cosine_s=cosine_s)
         alphas = 1. - betas
+        # numpy.cumprod = axis를 따라 누적 곱 계산 함수
         alphas_cumprod = np.cumprod(alphas, axis=0)
+        # [ 1., alpha_1, alpha_1 * alpha_2, alpha_1 * alpha_2 * alpha_3, ... alpha_1 * ... * alpha_{T-1} ]
         alphas_cumprod_prev = np.append(1., alphas_cumprod[:-1])
 
         timesteps, = betas.shape
@@ -142,6 +148,10 @@ class DDPM(pl.LightningModule):
 
         to_torch = partial(torch.tensor, dtype=torch.float32)
 
+        # register_buffer
+        # 1) optimizer가 update하지 않는다.
+        # 2) state_dict에 저장되어 나중에 사용 용이
+        # 3) GPU에서 작동함.
         self.register_buffer('betas', to_torch(betas))
         self.register_buffer('alphas_cumprod', to_torch(alphas_cumprod))
         self.register_buffer('alphas_cumprod_prev', to_torch(alphas_cumprod_prev))
@@ -160,6 +170,7 @@ class DDPM(pl.LightningModule):
         self.register_buffer('posterior_variance', to_torch(posterior_variance))
         # below: log calculation clipped because the posterior variance is 0 at the beginning of the diffusion chain
         self.register_buffer('posterior_log_variance_clipped', to_torch(np.log(np.maximum(posterior_variance, 1e-20))))
+        # posterior mean = posterior_mean_coef1 * x_0 + posterior_mean_coef2 * x_t
         self.register_buffer('posterior_mean_coef1', to_torch(
             betas * np.sqrt(alphas_cumprod_prev) / (1. - alphas_cumprod)))
         self.register_buffer('posterior_mean_coef2', to_torch(
@@ -174,6 +185,7 @@ class DDPM(pl.LightningModule):
             raise NotImplementedError("mu not supported")
         # TODO how to choose this term
         lvlb_weights[0] = lvlb_weights[1]
+        # persistent=False는 state_dict에 저장하지 않음.
         self.register_buffer('lvlb_weights', lvlb_weights, persistent=False)
         assert not torch.isnan(self.lvlb_weights).all()
 
@@ -253,6 +265,7 @@ class DDPM(pl.LightningModule):
     def p_sample(self, x, t, clip_denoised=True, repeat_noise=False):
         b, *_, device = *x.shape, x.device
         model_mean, _, model_log_variance = self.p_mean_variance(x=x, t=t, clip_denoised=clip_denoised)
+        # batch에 대해서는 noise 동일함.
         noise = noise_like(x.shape, device, repeat_noise)
         # no noise when t == 0
         nonzero_mask = (1 - (t == 0).float()).reshape(b, *((1,) * (len(x.shape) - 1)))
@@ -264,6 +277,7 @@ class DDPM(pl.LightningModule):
         b = shape[0]
         img = torch.randn(shape, device=device)
         intermediates = [img]
+        # T -> T-1 -> ... -> 1
         for i in tqdm(reversed(range(0, self.num_timesteps)), desc='Sampling t', total=self.num_timesteps):
             img = self.p_sample(img, torch.full((b,), i, device=device, dtype=torch.long),
                                 clip_denoised=self.clip_denoised)
@@ -282,6 +296,9 @@ class DDPM(pl.LightningModule):
 
     def q_sample(self, x_start, t, noise=None):
         noise = default(noise, lambda: torch.randn_like(x_start))
+        # (b, 1, 1, 1) * (b, c, h, w) = (b, c, h, w)
+        # mean, var, _ = self.q_mean_variance(x_start, t)
+        # return mean + np.sqrt(var) * noise
         return (extract_into_tensor(self.sqrt_alphas_cumprod, t, x_start.shape) * x_start +
                 extract_into_tensor(self.sqrt_one_minus_alphas_cumprod, t, x_start.shape) * noise)
 
@@ -302,7 +319,9 @@ class DDPM(pl.LightningModule):
 
     def p_losses(self, x_start, t, noise=None):
         noise = default(noise, lambda: torch.randn_like(x_start))
+        # forward process
         x_noisy = self.q_sample(x_start=x_start, t=t, noise=noise)
+        # reverse process (neural network)
         model_out = self.model(x_noisy, t)
 
         loss_dict = {}
@@ -329,9 +348,11 @@ class DDPM(pl.LightningModule):
 
         return loss, loss_dict
 
+    # arguments는 tuple, kwargs는 dictionary 형태로 받아진다.(keywards .... a=2, b=3 이러한 형태)
     def forward(self, x, *args, **kwargs):
         # b, c, h, w, device, img_size, = *x.shape, x.device, self.image_size
         # assert h == img_size and w == img_size, f'height and width of image must be {img_size}'
+        # t ~ Uniform(0,...T-1) shape = (batch,)
         t = torch.randint(0, self.num_timesteps, (x.shape[0],), device=self.device).long()
         return self.p_losses(x, t, *args, **kwargs)
 
@@ -450,6 +471,7 @@ class LatentDiffusion(DDPM):
         self.scale_by_std = scale_by_std
         assert self.num_timesteps_cond <= kwargs['timesteps']
         # for backwards compatibility after implementation of DiffusionWrapper
+        # model(DiffusionWrapper) 인스턴스 생성 시 conditioning_key 주입
         if conditioning_key is None:
             conditioning_key = 'concat' if concat_mode else 'crossattn'
         if cond_stage_config == '__is_unconditional__':
@@ -469,19 +491,20 @@ class LatentDiffusion(DDPM):
             self.scale_factor = scale_factor
         else:
             self.register_buffer('scale_factor', torch.tensor(scale_factor))
+        # model 인스턴스(self.first_stage_model, self.cond_stage_model) 정의
         self.instantiate_first_stage(first_stage_config)
         self.instantiate_cond_stage(cond_stage_config)
 
         self.cond_stage_forward = cond_stage_forward
         self.clip_denoised = False
-        self.bbox_tokenizer = None  
+        self.bbox_tokenizer = None
 
         self.restarted_from_ckpt = False
         if ckpt_path is not None:
             self.init_from_ckpt(ckpt_path, ignore_keys)
             self.restarted_from_ckpt = True
 
-
+        # unfreeze_model: base model parameter 학습을 허용하는지 여부
         if not self.unfreeze_model:
             self.cond_stage_model.eval()
             self.cond_stage_model.train = disabled_train
@@ -492,7 +515,7 @@ class LatentDiffusion(DDPM):
             self.model.train = disabled_train
             for param in self.model.parameters():
                 param.requires_grad = False
-        
+
         self.embedding_manager = self.instantiate_embedding_manager(personalization_config, self.cond_stage_model)
 
         for param in self.embedding_manager.embedding_parameters():
@@ -500,7 +523,9 @@ class LatentDiffusion(DDPM):
 
     def make_cond_schedule(self, ):
         self.cond_ids = torch.full(size=(self.num_timesteps,), fill_value=self.num_timesteps - 1, dtype=torch.long)
+        # 반올림(nearest even value)
         ids = torch.round(torch.linspace(0, self.num_timesteps - 1, self.num_timesteps_cond)).long()
+        # cond_ids = 0~T-1 까지 T'개 되도록 등분배한 ids + 나머지 [T-1,..., T-1]
         self.cond_ids[:self.num_timesteps_cond] = ids
 
     @rank_zero_only
@@ -557,14 +582,14 @@ class LatentDiffusion(DDPM):
             assert config != '__is_unconditional__'
             model = instantiate_from_config(config)
             self.cond_stage_model = model
-            
-    
+
+
     def instantiate_embedding_manager(self, config, embedder):
         model = instantiate_from_config(config, embedder=embedder)
 
         if config.params.get("embedding_manager_ckpt", None): # do not load if missing OR empty string
             model.load(config.params.embedding_manager_ckpt)
-        
+
         return model
 
     def _get_denoise_row_from_list(self, samples, desc='', force_no_decoder_quantization=False):
@@ -606,6 +631,12 @@ class LatentDiffusion(DDPM):
         x = torch.arange(0, w).view(1, w, 1).repeat(h, 1, 1)
 
         arr = torch.cat([y, x], dim=-1)
+        # e.g. meshgrid(h=4, w=7)
+        # tensor([[[0, 0], [0, 1], [0, 2], [0, 3], [0, 4], [0, 5], [0, 6]],
+        #         [[1, 0], [1, 1], [1, 2], [1, 3], [1, 4], [1, 5], [1, 6]],
+        #         [[2, 0], [2, 1], [2, 2], [2, 3], [2, 4], [2, 5], [2, 6]],
+        #         [[3, 0], [3, 1], [3, 2], [3, 3], [3, 4], [3, 5], [3, 6]]])
+        # shape = (h, w, 2)
         return arr
 
     def delta_border(self, h, w):
@@ -617,15 +648,22 @@ class LatentDiffusion(DDPM):
         """
         lower_right_corner = torch.tensor([h - 1, w - 1]).view(1, 1, 2)
         arr = self.meshgrid(h, w) / lower_right_corner
+        # torch.min[0]: values tensor
         dist_left_up = torch.min(arr, dim=-1, keepdims=True)[0]
         dist_right_down = torch.min(1 - arr, dim=-1, keepdims=True)[0]
         edge_dist = torch.min(torch.cat([dist_left_up, dist_right_down], dim=-1), dim=-1)[0]
+        # e.g. delta_border(h=4, w=7)
+        # tensor([[0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000],
+        #         [0.0000, 0.1667, 0.3333, 0.3333, 0.3333, 0.1667, 0.0000],
+        #         [0.0000, 0.1667, 0.3333, 0.3333, 0.3333, 0.1667, 0.0000],
+        #         [0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000, 0.0000]])
         return edge_dist
 
     def get_weighting(self, h, w, Ly, Lx, device):
         weighting = self.delta_border(h, w)
         weighting = torch.clip(weighting, self.split_input_params["clip_min_weight"],
                                self.split_input_params["clip_max_weight"], )
+        # shape = (1, h*w, Ly*Lx)
         weighting = weighting.view(1, h * w, 1).repeat(1, 1, Ly * Lx).to(device)
 
         if self.split_input_params["tie_braker"]:
@@ -651,10 +689,13 @@ class LatentDiffusion(DDPM):
 
         if uf == 1 and df == 1:
             fold_params = dict(kernel_size=kernel_size, dilation=1, padding=0, stride=stride)
+            # Unfold는 h*W input layer에서 conv filter를 sliding하면서 나올 수 있는 kernel을 1d로 flatten하여 열로 나열시키는 것.
             unfold = torch.nn.Unfold(**fold_params)
 
+            # Fold는 conv filter 값으로 열 나열된 tensor를 2D으로 변형하여 output layer에 누적하여 더해주는 것.
             fold = torch.nn.Fold(output_size=x.shape[2:], **fold_params)
 
+            # shape = (1, kernel_size[0] * kernel_size[1], Ly * Lx)
             weighting = self.get_weighting(kernel_size[0], kernel_size[1], Ly, Lx, x.device).to(x.dtype)
             normalization = fold(weighting).view(1, 1, h, w)  # normalizes the overlap
             weighting = weighting.view((1, 1, kernel_size[0], kernel_size[1], Ly * Lx))
@@ -833,7 +874,7 @@ class LatentDiffusion(DDPM):
                 z = z.view((z.shape[0], -1, ks[0], ks[1], z.shape[-1]))  # (bn, nc, ks[0], ks[1], L )
 
                 # 2. apply model loop over last dim
-                if isinstance(self.first_stage_model, VQModelInterface):  
+                if isinstance(self.first_stage_model, VQModelInterface):
                     output_list = [self.first_stage_model.decode(z[:, :, :, :, i],
                                                                  force_not_quantize=predict_cids or force_not_quantize)
                                    for i in range(z.shape[-1])]
@@ -913,6 +954,7 @@ class LatentDiffusion(DDPM):
             assert c is not None
             if self.cond_stage_trainable:
                 c = self.get_learned_conditioning(c)
+            # cond_ids 생성
             if self.shorten_cond_schedule:  # TODO: drop this option
                 tc = self.cond_ids[t].to(self.device)
                 c = self.q_sample(x_start=c, t=tc, noise=torch.randn_like(c.float()))

@@ -95,7 +95,9 @@ def betas_for_alpha_bar(num_diffusion_timesteps, alpha_bar, max_beta=0.999):
 
 def extract_into_tensor(a, t, x_shape):
     b, *_ = t.shape
+    # gather: 마지막 dimension에서 t에 대한 인덱스 원소들만 뽑아서 저장.
     out = a.gather(-1, t)
+    # shape = (b, 1, ... 1) (1이 len(x_shape)-1 개)
     return out.reshape(b, *((1,) * (len(x_shape) - 1)))
 
 
@@ -262,6 +264,8 @@ class HybridConditioner(nn.Module):
 
 
 def noise_like(shape, device, repeat=False):
+    # assert repeat_noise.shape == shape
+    # batch에 대해서는 noise 모두 동일함.
     repeat_noise = lambda: torch.randn((1, *shape[1:]), device=device).repeat(shape[0], *((1,) * (len(shape) - 1)))
     noise = lambda: torch.randn(shape, device=device)
     return repeat_noise() if repeat else noise()
