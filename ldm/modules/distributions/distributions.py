@@ -24,7 +24,9 @@ class DiracDistribution(AbstractDistribution):
 class DiagonalGaussianDistribution(object):
     def __init__(self, parameters, deterministic=False):
         self.parameters = parameters
+        # parameters >> torch.Size([2, 8, 64, 64])
         self.mean, self.logvar = torch.chunk(parameters, 2, dim=1)
+        # print(f"mean: {self.mean.shape}, logvar: {self.logvar.shape}") >> mean: torch.Size([2, 4, 64, 64]), logvar: torch.Size([2, 4, 64, 64])
         self.logvar = torch.clamp(self.logvar, -30.0, 20.0)
         self.deterministic = deterministic
         self.std = torch.exp(0.5 * self.logvar)

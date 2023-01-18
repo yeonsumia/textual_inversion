@@ -369,6 +369,7 @@ class DDPM(pl.LightningModule):
         loss, loss_dict = self(x)
         return loss, loss_dict
 
+    # LightningModule train loop
     def training_step(self, batch, batch_idx):
         loss, loss_dict = self.shared_step(batch)
 
@@ -384,6 +385,7 @@ class DDPM(pl.LightningModule):
 
         return loss
 
+    # LightningModule validation loop
     @torch.no_grad()
     def validation_step(self, batch, batch_idx):
         _, loss_dict_no_ema = self.shared_step(batch)
@@ -442,6 +444,7 @@ class DDPM(pl.LightningModule):
                 return {key: log[key] for key in return_keys}
         return log
 
+    # LightningModule
     def configure_optimizers(self):
         lr = self.learning_rate
         params = list(self.model.parameters())
@@ -516,11 +519,13 @@ class LatentDiffusion(DDPM):
             for param in self.model.parameters():
                 param.requires_grad = False
 
+        # 학습시킬 EmbeddingManager 모델
         self.embedding_manager = self.instantiate_embedding_manager(personalization_config, self.cond_stage_model)
 
         for param in self.embedding_manager.embedding_parameters():
             param.requires_grad = True
 
+    # 실제로 fine-tuning할 때는 이 함수 안 쓰임
     def make_cond_schedule(self, ):
         self.cond_ids = torch.full(size=(self.num_timesteps,), fill_value=self.num_timesteps - 1, dtype=torch.long)
         # 반올림(nearest even value)
@@ -954,7 +959,7 @@ class LatentDiffusion(DDPM):
             assert c is not None
             if self.cond_stage_trainable:
                 c = self.get_learned_conditioning(c)
-            # cond_ids 생성
+            # 실제로 fine-tuning 시에는 안 쓰임 (False)
             if self.shorten_cond_schedule:  # TODO: drop this option
                 tc = self.cond_ids[t].to(self.device)
                 c = self.q_sample(x_start=c, t=tc, noise=torch.randn_like(c.float()))
@@ -1540,6 +1545,7 @@ class LatentDiffusion(DDPM):
 class DiffusionWrapper(pl.LightningModule):
     def __init__(self, diff_model_config, conditioning_key):
         super().__init__()
+        # Unet 사용함
         self.diffusion_model = instantiate_from_config(diff_model_config)
         self.conditioning_key = conditioning_key
         assert self.conditioning_key in [None, 'concat', 'crossattn', 'hybrid', 'adm']

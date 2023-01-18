@@ -322,8 +322,11 @@ class AutoencoderKL(pl.LightningModule):
         print(f"Restored from {path}")
 
     def encode(self, x):
+        # print(f"x: {x.shape}") >> torch.Size([2, 3, 512, 512])
         h = self.encoder(x)
+        # print(f"h: {h.shape}") >> torch.Size([2, 8, 64, 64])
         moments = self.quant_conv(h)
+        # print(f"moments: {moments.shape}") >> torch.Size([2, 8, 64, 64])
         posterior = DiagonalGaussianDistribution(moments)
         return posterior
 

@@ -462,6 +462,7 @@ class CUDACallback(Callback):
         except AttributeError:
             pass
 
+# swap_step 이후부터는 base model도 학습시키도록 하는 callback. 현재 main.py에서는 사용되지는 않음.
 class ModeSwapCallback(Callback):
 
     def __init__(self, swap_step=2000):
@@ -794,8 +795,8 @@ if __name__ == "__main__":
 
         import signal
 
-        signal.signal(signal.SIGUSR1, melk)
-        signal.signal(signal.SIGUSR2, divein)
+        signal.signal(signal.SIGTERM, melk)
+        signal.signal(signal.SIGTERM, divein)
 
         # run
         if opt.train:

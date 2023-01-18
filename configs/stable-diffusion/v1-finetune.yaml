@@ -17,7 +17,7 @@ model:
     scale_factor: 0.18215
     use_ema: False
     embedding_reg_weight: 0.0
-    unfreeze_model: False
+    unfreeze_model: False # base model(S.D.)는 학습시키지 않고, embedding manager만 학습함.
     model_lr: 0.0
 
     personalization_config:
@@ -76,11 +76,12 @@ data:
   target: main.DataModuleFromConfig
   params:
     batch_size: 2
-    num_workers: 2
+    num_workers: 20
     wrap: false
     train:
       target: ldm.data.personalized.PersonalizedBase
       params:
+        # data_root는 arguments로 입력 받음
         size: 512
         set: train
         per_image_tokens: false
@@ -88,10 +89,11 @@ data:
     validation:
       target: ldm.data.personalized.PersonalizedBase
       params:
+        # data_root는 arguments로 입력 받음 (train set과 동일 값 전달 받음)
         size: 512
         set: val
         per_image_tokens: false
-        repeats: 10
+        repeats: 10 # not used
 
 lightning:
   modelcheckpoint:

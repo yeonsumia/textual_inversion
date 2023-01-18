@@ -149,6 +149,7 @@ class PersonalizedBase(Dataset):
         self.image_paths = [os.path.join(self.data_root, file_path) for file_path in os.listdir(self.data_root)]
 
         # self._length = len(self.image_paths)
+        # few shots(3-5)
         self.num_images = len(self.image_paths)
         self._length = self.num_images 
 
@@ -160,6 +161,7 @@ class PersonalizedBase(Dataset):
 
         self.coarse_class_text = coarse_class_text
 
+        # train 시 false 값으로 주어짐.
         if per_image_tokens:
             assert self.num_images < len(per_img_token_list), f"Can't use per-image tokens when the training set contains more than {len(per_img_token_list)} tokens. To enable larger sets, add more tokens to 'per_img_token_list'."
 
@@ -192,7 +194,8 @@ class PersonalizedBase(Dataset):
             text = random.choice(imagenet_dual_templates_small).format(placeholder_string, per_img_token_list[i % self.num_images])
         else:
             text = random.choice(imagenet_templates_small).format(placeholder_string)
-            
+
+        # "A PHOTO OF *"에 해당하는 text
         example["caption"] = text
 
         # default to score-sde preprocessing
