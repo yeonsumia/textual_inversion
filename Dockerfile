@@ -13,7 +13,7 @@ RUN rm -rf /var/lib/apt/lists/* && apt-get update
 
 RUN groupadd --gid ${GID} ${USERNAME} \
     && useradd --uid ${UID} --gid ${GID} -m -s /bin/bash ${USERNAME} \
-    && $APT_INSTALL sudo nano curl wget unzip git vim python3-pip \
+    && $APT_INSTALL sudo nano curl wget unzip git vim python3-pip zsh locales \
     && rm -rf /var/lib/apt/lists/* \
     && echo ${USERNAME} ALL=\(root\) NOPASSWD:ALL > /etc/sudoers.d/${USERNAME} \
     && chmod 0440 /etc/sudoers.d/${USERNAME}
@@ -33,21 +33,14 @@ RUN wget --quiet https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86
     && sudo rm -rf /var/lib/apt/lists/* \
 
 # Install zsh for interactive container
-ARG DEFAULT_SHELL="zsh"
-ENV DEFAULT_SHELL=$DEFAULT_SHELL
-RUN if [ ${DEFAULT_SHELL} = "zsh" ]; \
-    then sudo apt-get update \
-    && sudo $APT_INSTALL zsh locales \
-    && sudo locale-gen en_US.UTF-8 \
+RUN sudo locale-gen en_US.UTF-8 \
+    && sudo chsh -s /usr/bin/zsh \
     && sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)" "" --unattended > /dev/null \
     && git clone -q https://github.com/zsh-users/zsh-syntax-highlighting.git ${ZSH_CUSTOM:-~/.oh-my-zsh/custom}/plugins/zsh-syntax-highlighting \
     && git clone -q https://github.com/zsh-users/zsh-autosuggestions ${ZSH_CUSTOM:-~/.oh-my-zsh/custom}/plugins/zsh-autosuggestions \
     && sed -i 's/^ZSH_THEME.*/ZSH_THEME="agnoster"/' ~/.zshrc \
     && sed -i 's/^plugins.*/plugins=(git zsh-syntax-highlighting zsh-autosuggestions)/' ~/.zshrc \
-    && sudo chsh -s /usr/bin/zsh \
     && sudo rm -rf /var/lib/apt/lists/* \
-    ; \
-    fi
 
 # Install python packages by conda
 ENV CONDA_ENV=ldm
@@ -56,5 +49,4 @@ RUN conda init zsh \
     && echo "conda activate ${CONDA_ENV}" >> ~/.zshrc \
 
 #CMD ["/bin/bash"]
-SHELL ["/bin/bash", "-c"]
-CMD ["bash", "-c", "$DEFAULT_SHELL"]
+CMD ["zsh"]
