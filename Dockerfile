@@ -9,11 +9,11 @@ ARG USERNAME=hyeonseong
 ARG UID=2071
 ARG GID=${UID}
 
-RUN rm -rf /var/lib/apt/lists/* && apt-get update
+RUN rm -rf /var/lib/apt/lists/* && apt-get -y update && apt-get -y upgrade
 
 RUN groupadd --gid ${GID} ${USERNAME} \
     && useradd --uid ${UID} --gid ${GID} -m -s /bin/bash ${USERNAME} \
-    && $APT_INSTALL sudo nano curl wget unzip git vim python3-pip zsh locales \
+    && $APT_INSTALL sudo nano curl wget unzip git vim python3-pip zsh locales language-pack-en \
     && rm -rf /var/lib/apt/lists/* \
     && echo ${USERNAME} ALL=\(root\) NOPASSWD:ALL > /etc/sudoers.d/${USERNAME} \
     && chmod 0440 /etc/sudoers.d/${USERNAME}
@@ -34,6 +34,7 @@ RUN wget --quiet https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86
 
 # Install zsh for interactive container
 RUN sudo locale-gen en_US.UTF-8 \
+    && sudo update-locale \
     && sudo chsh -s /usr/bin/zsh \
     && sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)" "" --unattended > /dev/null \
     && git clone -q https://github.com/zsh-users/zsh-syntax-highlighting.git ${ZSH_CUSTOM:-~/.oh-my-zsh/custom}/plugins/zsh-syntax-highlighting \
@@ -46,7 +47,7 @@ RUN sudo locale-gen en_US.UTF-8 \
 ENV CONDA_ENV=ldm
 RUN conda init zsh \
     && conda env create -f environment.yaml \
-    && echo "conda activate ${CONDA_ENV}" >> ~/.zshrc \
+    && echo "conda activate ${CONDA_ENV}" >> ~/.zshrc
 
-#CMD ["/bin/bash"]
+EXPOSE 7777
 CMD ["zsh"]
