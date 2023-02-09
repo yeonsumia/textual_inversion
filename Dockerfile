@@ -13,7 +13,7 @@ RUN rm -rf /var/lib/apt/lists/* && apt-get -y update && apt-get -y upgrade
 
 RUN groupadd --gid ${GID} ${USERNAME} \
     && useradd --uid ${UID} --gid ${GID} -m -s /bin/bash ${USERNAME} \
-    && $APT_INSTALL sudo nano curl wget unzip git vim python3-pip zsh locales language-pack-en \
+    && $APT_INSTALL sudo nano curl wget unzip git vim python3-pip zsh locales language-pack-en lpips \
     && rm -rf /var/lib/apt/lists/* \
     && echo ${USERNAME} ALL=\(root\) NOPASSWD:ALL > /etc/sudoers.d/${USERNAME} \
     && chmod 0440 /etc/sudoers.d/${USERNAME}

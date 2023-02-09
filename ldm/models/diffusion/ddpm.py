@@ -19,6 +19,7 @@ from functools import partial
 from tqdm import tqdm
 from torchvision.utils import make_grid
 from pytorch_lightning.utilities.distributed import rank_zero_only
+from taming.modules.losses.lpips import LPIPS
 
 from ldm.util import log_txt_as_img, exists, default, ismap, isimage, mean_flat, count_params, instantiate_from_config
 from ldm.modules.ema import LitEma
@@ -26,7 +27,6 @@ from ldm.modules.distributions.distributions import normal_kl, DiagonalGaussianD
 from ldm.models.autoencoder import VQModelInterface, IdentityFirstStage, AutoencoderKL
 from ldm.modules.diffusionmodules.util import make_beta_schedule, extract_into_tensor, noise_like
 from ldm.models.diffusion.ddim import DDIMSampler
-
 
 __conditioning_keys__ = {'concat': 'c_concat',
                          'crossattn': 'c_crossattn',
@@ -41,6 +41,16 @@ def disabled_train(self, mode=True):
 
 def uniform_on_device(r1, r2, shape, device):
     return (r1 - r2) * torch.rand(*shape, device=device) + r2
+
+
+def get_lpips_loss(pred, target):
+    lpips = LPIPS(net='alex').cuda().eval()
+    assert pred.size() == target.size()  # torch.Size([2, 4, 64, 64]) >>> second dimension should be three
+    if len(pred.size()) == 4:
+        loss = torch.Tensor([lpips(pred[i, :, :, :], target[i, :, :, :]) for i in range(pred.size()[0])]).mean()
+    else:
+        loss = lpips(pred, target)
+    return loss
 
 
 class DDPM(pl.LightningModule):
@@ -124,7 +134,6 @@ class DDPM(pl.LightningModule):
         if self.learn_logvar:
             self.logvar = nn.Parameter(self.logvar, requires_grad=True)
 
-
     def register_schedule(self, given_betas=None, beta_schedule="linear", timesteps=1000,
                           linear_start=1e-4, linear_end=2e-2, cosine_s=8e-3):
         if exists(given_betas):
@@ -165,7 +174,7 @@ class DDPM(pl.LightningModule):
 
         # calculations for posterior q(x_{t-1} | x_t, x_0)
         posterior_variance = (1 - self.v_posterior) * betas * (1. - alphas_cumprod_prev) / (
-                    1. - alphas_cumprod) + self.v_posterior * betas
+                1. - alphas_cumprod) + self.v_posterior * betas
         # above: equal to 1. / (1. / (1. - alpha_cumprod_tm1) + alpha_t / beta_t)
         self.register_buffer('posterior_variance', to_torch(posterior_variance))
         # below: log calculation clipped because the posterior variance is 0 at the beginning of the diffusion chain
@@ -178,7 +187,7 @@ class DDPM(pl.LightningModule):
 
         if self.parameterization == "eps":
             lvlb_weights = self.betas ** 2 / (
-                        2 * self.posterior_variance * to_torch(alphas) * (1 - self.alphas_cumprod))
+                    2 * self.posterior_variance * to_torch(alphas) * (1 - self.alphas_cumprod))
         elif self.parameterization == "x0":
             lvlb_weights = 0.5 * np.sqrt(torch.Tensor(alphas_cumprod)) / (2. * 1 - torch.Tensor(alphas_cumprod))
         else:
@@ -456,10 +465,12 @@ class DDPM(pl.LightningModule):
 
 class LatentDiffusion(DDPM):
     """main class"""
+
     def __init__(self,
                  first_stage_config,
                  cond_stage_config,
                  personalization_config,
+                 discriminator_config,
                  num_timesteps_cond=None,
                  cond_stage_key="image",
                  cond_stage_trainable=False,
@@ -525,6 +536,9 @@ class LatentDiffusion(DDPM):
         for param in self.embedding_manager.embedding_parameters():
             param.requires_grad = True
 
+        # aim to learn embedding manager
+        self.discriminator = instantiate_from_config(discriminator_config)
+
     # 실제로 fine-tuning할 때는 이 함수 안 쓰임
     def make_cond_schedule(self, ):
         self.cond_ids = torch.full(size=(self.num_timesteps,), fill_value=self.num_timesteps - 1, dtype=torch.long)
@@ -549,7 +563,6 @@ class LatentDiffusion(DDPM):
             self.register_buffer('scale_factor', 1. / z.flatten().std())
             print(f"setting self.scale_factor to {self.scale_factor}")
             print("### USING STD-RESCALING ###")
-
 
     def register_schedule(self,
                           given_betas=None, beta_schedule="linear", timesteps=1000,
@@ -588,11 +601,10 @@ class LatentDiffusion(DDPM):
             model = instantiate_from_config(config)
             self.cond_stage_model = model
 
-
     def instantiate_embedding_manager(self, config, embedder):
         model = instantiate_from_config(config, embedder=embedder)
 
-        if config.params.get("embedding_manager_ckpt", None): # do not load if missing OR empty string
+        if config.params.get("embedding_manager_ckpt", None):  # do not load if missing OR empty string
             model.load(config.params.embedding_manager_ckpt)
 
         return model
@@ -601,7 +613,7 @@ class LatentDiffusion(DDPM):
         denoise_row = []
         for zd in tqdm(samples, desc=desc):
             denoise_row.append(self.decode_first_stage(zd.to(self.device),
-                                                            force_not_quantize=force_no_decoder_quantization))
+                                                       force_not_quantize=force_no_decoder_quantization))
         n_imgs_per_row = len(denoise_row)
         denoise_row = torch.stack(denoise_row)  # n_log_step, n_row, C, H, W
         denoise_grid = rearrange(denoise_row, 'n b c h w -> b n c h w')
@@ -949,8 +961,29 @@ class LatentDiffusion(DDPM):
             return self.first_stage_model.encode(x)
 
     def shared_step(self, batch, **kwargs):
-        x, c = self.get_input(batch, self.first_stage_key)
-        loss = self(x, c)
+        z, c, x, xrec = self.get_input(batch, self.first_stage_key, return_first_stage_outputs=True)
+        loss = self(z, c)
+        return loss, x, xrec
+
+    def training_step(self, batch, batch_idx):
+        loss_result, x, xrec = self.shared_step(batch)
+        loss, loss_dict = loss_result
+
+        dic_loss = self.discriminator(x, xrec, self.global_step)
+        print(f"original L2 loss: {loss}")
+        print(f"add discriminator loss: {dic_loss}")
+        loss = loss + dic_loss
+
+        self.log_dict(loss_dict, prog_bar=True,
+                      logger=True, on_step=True, on_epoch=True)
+
+        self.log("global_step", self.global_step,
+                 prog_bar=True, logger=True, on_step=True, on_epoch=False)
+
+        if self.use_scheduler:
+            lr = self.optimizers().param_groups[0]['lr']
+            self.log('lr_abs', lr, prog_bar=True, logger=True, on_step=True, on_epoch=False)
+
         return loss
 
     def forward(self, x, c, *args, **kwargs):
@@ -989,7 +1022,7 @@ class LatentDiffusion(DDPM):
 
         if hasattr(self, "split_input_params"):
             assert len(cond) == 1  # todo can only deal with one conditioning atm
-            assert not return_ids  
+            assert not return_ids
             ks = self.split_input_params["ks"]  # eg. (128, 128)
             stride = self.split_input_params["stride"]  # eg. (64, 64)
 
@@ -1081,7 +1114,7 @@ class LatentDiffusion(DDPM):
 
     def _predict_eps_from_xstart(self, x_t, t, pred_xstart):
         return (extract_into_tensor(self.sqrt_recip_alphas_cumprod, t, x_t.shape) * x_t - pred_xstart) / \
-               extract_into_tensor(self.sqrt_recipm1_alphas_cumprod, t, x_t.shape)
+            extract_into_tensor(self.sqrt_recipm1_alphas_cumprod, t, x_t.shape)
 
     def _prior_bpd(self, x_start):
         """
@@ -1123,6 +1156,10 @@ class LatentDiffusion(DDPM):
             loss_dict.update({'logvar': self.logvar.data.mean()})
 
         loss = self.l_simple_weight * loss.mean()
+        # available when self.channels equls to 4
+        # print(f"original L2 loss: {loss}")
+        # loss = loss + 0.1 * get_lpips_loss(model_output, target)
+        # print(f"add lpips loss: {loss}")
 
         loss_vlb = self.get_loss(model_output, target, mean=False).mean(dim=(1, 2, 3))
         loss_vlb = (self.lvlb_weights[t] * loss_vlb).mean()
@@ -1312,7 +1349,7 @@ class LatentDiffusion(DDPM):
     @torch.no_grad()
     def sample(self, cond, batch_size=16, return_intermediates=False, x_T=None,
                verbose=True, timesteps=None, quantize_denoised=False,
-               mask=None, x0=None, shape=None,**kwargs):
+               mask=None, x0=None, shape=None, **kwargs):
         if shape is None:
             shape = (batch_size, self.channels, self.image_size, self.image_size)
         if cond is not None:
@@ -1328,17 +1365,17 @@ class LatentDiffusion(DDPM):
                                   mask=mask, x0=x0)
 
     @torch.no_grad()
-    def sample_log(self,cond,batch_size,ddim, ddim_steps,**kwargs):
+    def sample_log(self, cond, batch_size, ddim, ddim_steps, **kwargs):
 
         if ddim:
             ddim_sampler = DDIMSampler(self)
             shape = (self.channels, self.image_size, self.image_size)
-            samples, intermediates =ddim_sampler.sample(ddim_steps,batch_size,
-                                                        shape,cond,verbose=False,**kwargs)
+            samples, intermediates = ddim_sampler.sample(ddim_steps, batch_size,
+                                                         shape, cond, verbose=False, **kwargs)
 
         else:
             samples, intermediates = self.sample(cond=cond, batch_size=batch_size,
-                                                 return_intermediates=True,**kwargs)
+                                                 return_intermediates=True, **kwargs)
 
         return samples, intermediates
 
@@ -1395,21 +1432,21 @@ class LatentDiffusion(DDPM):
         if sample:
             # get denoise row
             with self.ema_scope("Plotting"):
-                samples, z_denoise_row = self.sample_log(cond=c,batch_size=N,ddim=use_ddim,
-                                                         ddim_steps=ddim_steps,eta=ddim_eta)
+                samples, z_denoise_row = self.sample_log(cond=c, batch_size=N, ddim=use_ddim,
+                                                         ddim_steps=ddim_steps, eta=ddim_eta)
                 # samples, z_denoise_row = self.sample(cond=c, batch_size=N, return_intermediates=True)
             x_samples = self.decode_first_stage(samples)
             log["samples"] = x_samples
             if plot_denoise_rows:
                 denoise_grid = self._get_denoise_row_from_list(z_denoise_row)
                 log["denoise_row"] = denoise_grid
-            
+
             uc = self.get_learned_conditioning(len(c) * [""])
-            sample_scaled, _ = self.sample_log(cond=c, 
-                                               batch_size=N, 
-                                               ddim=use_ddim, 
+            sample_scaled, _ = self.sample_log(cond=c,
+                                               batch_size=N,
+                                               ddim=use_ddim,
                                                ddim_steps=ddim_steps,
-                                               eta=ddim_eta,                                                 
+                                               eta=ddim_eta,
                                                unconditional_guidance_scale=5.0,
                                                unconditional_conditioning=uc)
             log["samples_scaled"] = self.decode_first_stage(sample_scaled)
@@ -1418,8 +1455,8 @@ class LatentDiffusion(DDPM):
                     self.first_stage_model, IdentityFirstStage):
                 # also display when quantizing x0 while sampling
                 with self.ema_scope("Plotting Quantized Denoised"):
-                    samples, z_denoise_row = self.sample_log(cond=c,batch_size=N,ddim=use_ddim,
-                                                             ddim_steps=ddim_steps,eta=ddim_eta,
+                    samples, z_denoise_row = self.sample_log(cond=c, batch_size=N, ddim=use_ddim,
+                                                             ddim_steps=ddim_steps, eta=ddim_eta,
                                                              quantize_denoised=True)
                     # samples, z_denoise_row = self.sample(cond=c, batch_size=N, return_intermediates=True,
                     #                                      quantize_denoised=True)
@@ -1434,17 +1471,16 @@ class LatentDiffusion(DDPM):
                 mask[:, h // 4:3 * h // 4, w // 4:3 * w // 4] = 0.
                 mask = mask[:, None, ...]
                 with self.ema_scope("Plotting Inpaint"):
-
-                    samples, _ = self.sample_log(cond=c,batch_size=N,ddim=use_ddim, eta=ddim_eta,
-                                                ddim_steps=ddim_steps, x0=z[:N], mask=mask)
+                    samples, _ = self.sample_log(cond=c, batch_size=N, ddim=use_ddim, eta=ddim_eta,
+                                                 ddim_steps=ddim_steps, x0=z[:N], mask=mask)
                 x_samples = self.decode_first_stage(samples.to(self.device))
                 log["samples_inpainting"] = x_samples
                 log["mask"] = mask
 
                 # outpaint
                 with self.ema_scope("Plotting Outpaint"):
-                    samples, _ = self.sample_log(cond=c, batch_size=N, ddim=use_ddim,eta=ddim_eta,
-                                                ddim_steps=ddim_steps, x0=z[:N], mask=mask)
+                    samples, _ = self.sample_log(cond=c, batch_size=N, ddim=use_ddim, eta=ddim_eta,
+                                                 ddim_steps=ddim_steps, x0=z[:N], mask=mask)
                 x_samples = self.decode_first_stage(samples.to(self.device))
                 log["samples_outpainting"] = x_samples
 
@@ -1466,14 +1502,19 @@ class LatentDiffusion(DDPM):
     def configure_optimizers(self):
         lr = self.learning_rate
 
-        if self.embedding_manager is not None: # If using textual inversion
+        if self.embedding_manager is not None:  # If using textual inversion
             embedding_params = list(self.embedding_manager.embedding_parameters())
 
-            if self.unfreeze_model: # Are we allowing the base model to train? If so, set two different parameter groups.
+        if self.discriminator:
+            discriminator_params = list(self.discriminator.discriminator.parameters())
+
+            if self.unfreeze_model:  # Are we allowing the base model to train? If so, set two different parameter groups.
                 model_params = list(self.cond_stage_model.parameters()) + list(self.model.parameters())
-                opt = torch.optim.AdamW([{"params": embedding_params, "lr": lr}, {"params": model_params}], lr=self.model_lr)
-            else: # Otherwise, train only embedding
-                opt = torch.optim.AdamW(embedding_params, lr=lr)
+                opt = torch.optim.AdamW([{"params": embedding_params, "lr": lr}, {"params": model_params}],
+                                        lr=self.model_lr)
+            else:  # Otherwise, train only embedding
+                merged_params = embedding_params + discriminator_params
+                opt = torch.optim.AdamW(merged_params, lr=lr)
         else:
             params = list(self.model.parameters())
             if self.cond_stage_trainable:
@@ -1519,7 +1560,8 @@ class LatentDiffusion(DDPM):
 
         model_params = list(self.cond_stage_model.parameters()) + list(self.model.parameters())
         embedding_params = list(self.embedding_manager.embedding_parameters())
-        return torch.optim.AdamW([{"params": embedding_params, "lr": self.learning_rate}, {"params": model_params}], lr=self.model_lr)
+        return torch.optim.AdamW([{"params": embedding_params, "lr": self.learning_rate}, {"params": model_params}],
+                                 lr=self.model_lr)
 
     @torch.no_grad()
     def to_rgb(self, x):
@@ -1533,13 +1575,14 @@ class LatentDiffusion(DDPM):
     @rank_zero_only
     def on_save_checkpoint(self, checkpoint):
 
-        if not self.unfreeze_model: # If we are not tuning the model itself, zero-out the checkpoint content to preserve memory.
+        if not self.unfreeze_model:  # If we are not tuning the model itself, zero-out the checkpoint content to preserve memory.
             checkpoint.clear()
-        
+
         if os.path.isdir(self.trainer.checkpoint_callback.dirpath):
             self.embedding_manager.save(os.path.join(self.trainer.checkpoint_callback.dirpath, "embeddings.pt"))
 
-            self.embedding_manager.save(os.path.join(self.trainer.checkpoint_callback.dirpath, f"embeddings_gs-{self.global_step}.pt"))
+            self.embedding_manager.save(
+                os.path.join(self.trainer.checkpoint_callback.dirpath, f"embeddings_gs-{self.global_step}.pt"))
 
 
 class DiffusionWrapper(pl.LightningModule):

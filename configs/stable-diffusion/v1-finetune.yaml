@@ -1,5 +1,5 @@
 model:
-  base_learning_rate: 5.0e-03
+  base_learning_rate: 2.0e-03  # 5.0e-03: initial base_learning_rate, 2.0e-03: for learning human images
   target: ldm.models.diffusion.ddpm.LatentDiffusion
   params:
     linear_start: 0.00085
@@ -24,10 +24,15 @@ model:
       target: ldm.modules.embedding_manager.EmbeddingManager
       params:
         placeholder_strings: ["*"]
-        initializer_words: ["sculpture"]
+        initializer_words: ["*"]
         per_image_tokens: false
         num_vectors_per_token: 1
         progressive_words: False
+
+    discriminator_config:
+      target: ldm.modules.losses.contperceptual.LPIPSWithDiscriminator
+      params:
+        disc_start: 100 # train embedding with discriminator after the following global step
 
     unet_config:
       target: ldm.modules.diffusionmodules.openaimodel.UNetModel
@@ -98,15 +103,15 @@ data:
 lightning:
   modelcheckpoint:
     params:
-      every_n_train_steps: 500
+      every_n_train_steps: 100
   callbacks:
     image_logger:
-      target: main.ImageLogger
+      target: util.callback.ImageLogger
       params:
-        batch_frequency: 500
+        batch_frequency: 100
         max_images: 8
         increase_log_steps: False
 
   trainer:
     benchmark: True
-    max_steps: 6100
+    max_steps: 1000
