@@ -35,6 +35,8 @@ class LPIPSWithDiscriminator(nn.Module):
         if last_layer is not None:
             nll_grads = torch.autograd.grad(nll_loss, last_layer, retain_graph=True)[0]
             g_grads = torch.autograd.grad(g_loss, last_layer, retain_graph=True)[0]
+            # print(f"nll_grads: {nll_grads}")
+            # print(f"g_grads: {g_grads}")
         else:
             nll_grads = torch.autograd.grad(nll_loss, self.last_layer[0], retain_graph=True)[0]
             g_grads = torch.autograd.grad(g_loss, self.last_layer[0], retain_graph=True)[0]
@@ -47,7 +49,7 @@ class LPIPSWithDiscriminator(nn.Module):
     def forward(self, inputs, reconstructions, global_step,
                 posteriors=None, last_layer=None, cond=None, split="train",
                 weights=None):
-        rec_loss = torch.abs(inputs.contiguous() - reconstructions.contiguous())
+        rec_loss = torch.abs(inputs.contiguous() - reconstructions.contiguous())  # torch.Size([2, 3, 512, 512])
         if self.perceptual_weight > 0:
             p_loss = self.perceptual_loss(inputs.contiguous(), reconstructions.contiguous())
             rec_loss = rec_loss + self.perceptual_weight * p_loss
@@ -75,7 +77,13 @@ class LPIPSWithDiscriminator(nn.Module):
             g_loss = -torch.mean(logits_fake)
 
             if self.disc_factor > 0.0:
+                # count = 0
+                # for p in last_layer:
+                #     print(p)
+                #     count += 1
+                # print(f"length: {count}")
                 try:
+                    assert torch.is_tensor(last_layer)  # embedding manager parameters
                     d_weight = self.calculate_adaptive_weight(nll_loss, g_loss, last_layer=last_layer)
                 except RuntimeError:
                     assert not self.training

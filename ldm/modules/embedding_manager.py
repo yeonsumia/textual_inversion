@@ -98,7 +98,7 @@ class EmbeddingManager(nn.Module):
 
             if self.max_vectors_per_token == 1: # If there's only one vector per token, we can do a simple replacement
                 placeholder_idx = torch.where(tokenized_text == placeholder_token.to(device))
-                embedded_text[placeholder_idx] = placeholder_embedding
+                embedded_text[placeholder_idx] = 0.1 * placeholder_embedding + 0.9 * embedded_text[placeholder_idx]
             else: # otherwise, need to insert and keep track of changing indices
                 if self.progressive_words:
                     self.progressive_counter += 1

@@ -29,11 +29,6 @@ model:
         num_vectors_per_token: 1
         progressive_words: False
 
-    discriminator_config:
-      target: ldm.modules.losses.contperceptual.LPIPSWithDiscriminator
-      params:
-        disc_start: 100 # train embedding with discriminator after the following global step
-
     unet_config:
       target: ldm.modules.diffusionmodules.openaimodel.UNetModel
       params:

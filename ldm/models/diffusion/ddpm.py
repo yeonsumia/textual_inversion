@@ -470,7 +470,6 @@ class LatentDiffusion(DDPM):
                  first_stage_config,
                  cond_stage_config,
                  personalization_config,
-                 discriminator_config,
                  num_timesteps_cond=None,
                  cond_stage_key="image",
                  cond_stage_trainable=False,
@@ -535,9 +534,6 @@ class LatentDiffusion(DDPM):
 
         for param in self.embedding_manager.embedding_parameters():
             param.requires_grad = True
-
-        # aim to learn embedding manager
-        self.discriminator = instantiate_from_config(discriminator_config)
 
     # 실제로 fine-tuning할 때는 이 함수 안 쓰임
     def make_cond_schedule(self, ):
@@ -961,29 +957,8 @@ class LatentDiffusion(DDPM):
             return self.first_stage_model.encode(x)
 
     def shared_step(self, batch, **kwargs):
-        z, c, x, xrec = self.get_input(batch, self.first_stage_key, return_first_stage_outputs=True)
-        loss = self(z, c)
-        return loss, x, xrec
-
-    def training_step(self, batch, batch_idx):
-        loss_result, x, xrec = self.shared_step(batch)
-        loss, loss_dict = loss_result
-
-        dic_loss = self.discriminator(x, xrec, self.global_step)
-        print(f"original L2 loss: {loss}")
-        print(f"add discriminator loss: {dic_loss}")
-        loss = loss + dic_loss
-
-        self.log_dict(loss_dict, prog_bar=True,
-                      logger=True, on_step=True, on_epoch=True)
-
-        self.log("global_step", self.global_step,
-                 prog_bar=True, logger=True, on_step=True, on_epoch=False)
-
-        if self.use_scheduler:
-            lr = self.optimizers().param_groups[0]['lr']
-            self.log('lr_abs', lr, prog_bar=True, logger=True, on_step=True, on_epoch=False)
-
+        x, c = self.get_input(batch, self.first_stage_key)
+        loss = self(x, c)
         return loss
 
     def forward(self, x, c, *args, **kwargs):
@@ -1505,16 +1480,12 @@ class LatentDiffusion(DDPM):
         if self.embedding_manager is not None:  # If using textual inversion
             embedding_params = list(self.embedding_manager.embedding_parameters())
 
-        if self.discriminator:
-            discriminator_params = list(self.discriminator.discriminator.parameters())
-
             if self.unfreeze_model:  # Are we allowing the base model to train? If so, set two different parameter groups.
                 model_params = list(self.cond_stage_model.parameters()) + list(self.model.parameters())
                 opt = torch.optim.AdamW([{"params": embedding_params, "lr": lr}, {"params": model_params}],
                                         lr=self.model_lr)
             else:  # Otherwise, train only embedding
-                merged_params = embedding_params + discriminator_params
-                opt = torch.optim.AdamW(merged_params, lr=lr)
+                opt = torch.optim.AdamW(embedding_params, lr=lr)
         else:
             params = list(self.model.parameters())
             if self.cond_stage_trainable:
